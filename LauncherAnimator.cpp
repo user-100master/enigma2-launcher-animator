@@ -15,11 +15,57 @@ struct TileAnimationData {
     int targetY;
 };
 
-class LauncherAnimator : public iObject {
-    DECLARE_REF(LauncherAnimator);
+class LauncherAnimator {
 private:
     eTimer* m_animation_timer;
     std::vector<TileAnimationData> m_active_animations;
+
+public:
+    LauncherAnimator() {
+        // Instantiate Enigma2 C++ core eTimer hooked directly into the main loop application thread
+        m_animation_timer = new eTimer(eApp);
+        
+        // Connect the timer timeout event straight to our local calculation loop tick step
+        m_animation_timer->timeout.connect(slot(*this, &LauncherAnimator::timerTick));
+    }
+
+    ~LauncherAnimator() {
+        if (m_animation_timer) {
+            m_animation_timer->stop();
+            delete m_animation_timer;
+        }
+        m_active_animations.clear();
+    }
+
+    void startSlide(unsigned long widgetPointer, int fromX, int toX, int durationMs) {
+        eWidget* widget = (eWidget*)widgetPointer;
+        if (!widget) return;
+
+        // Remove any existing active animations for this specific widget pointer to avoid coordinate fights
+        for (auto it = m_active_animations.begin(); it != m_active_animations.end(); ) {
+            if (it->targetWidget == widget) {
+                it = m_active_animations.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        TileAnimationData anim;
+        anim.targetWidget = widget;
+        anim.startX = (float)fromX;
+        anim.targetX = (float)toX;
+        anim.currentX = anim.startX;
+        anim.durationSeconds = (float)durationMs / 1000.0f;
+        anim.targetY = widget->position().y(); // Freeze current Y alignment to ensure it slides strictly on X axis
+        clock_gettime(CLOCK_MONOTONIC, &anim.startTime);
+
+        m_active_animations.push_back(anim);
+
+        // Wake up the hardware timer loop if it isn't running
+        if (!m_animation_timer->isActive()) {
+            m_animation_timer->start(16, true);
+        }
+    }
 
     void timerTick() {
         struct timespec currentTime;
@@ -68,65 +114,16 @@ private:
             m_animation_timer->stop();
         }
     }
-
-public:
-    LauncherAnimator() {
-        // Instantiate Enigma2 C++ core eTimer hooked directly into the main loop application thread
-        m_animation_timer = new eTimer(eApp);
-        CONNECT(m_animation_timer->timeout, LauncherAnimator::timerTick);
-    }
-
-    ~LauncherAnimator() {
-        if (m_animation_timer) {
-            m_animation_timer->stop();
-            delete m_animation_timer;
-        }
-        m_active_animations.clear();
-    }
-
-    void startSlide(unsigned long widgetPointer, int fromX, int toX, int durationMs) {
-        eWidget* widget = (eWidget*)widgetPointer;
-        if (!widget) return;
-
-        // Remove any existing active animations for this specific widget pointer to avoid conflicts
-        for (auto it = m_active_animations.begin(); it != m_active_animations.end(); ) {
-            if (it->targetWidget == widget) {
-                it = m_active_animations.erase(it);
-            } else {
-                ++it;
-            }
-        }
-
-        TileAnimationData anim;
-        anim.targetWidget = widget;
-        anim.startX = (float)fromX;
-        anim.targetX = (float)toX;
-        anim.currentX = anim.startX;
-        anim.durationSeconds = (float)durationMs / 1000.0f;
-        anim.targetY = widget->position().y(); // Freeze current Y alignment to ensure it slides strictly on X axis
-        clock_gettime(CLOCK_MONOTONIC, &anim.startTime);
-
-        m_active_animations.push_back(anim);
-
-        // Wake up the hardware timer loop if it isn't running
-        if (!m_animation_timer->isActive()) {
-            m_animation_timer->start(16, true);
-        }
-    }
 };
-
-DEFINE_REF(LauncherAnimator);
 
 // Exported Python C-Linkage Interface Hooks
 extern "C" {
-    LauncherAnimator* NewAnimator() {
-        LauncherAnimator* anim = new LauncherAnimator();
-        anim->AddRef();
-        return anim;
+    LauncherAnimator* NewAnimator() { 
+        return new LauncherAnimator(); 
     }
     
     void DeleteAnimator(LauncherAnimator* anim) {
-        if (anim) anim->Release();
+        if (anim) delete anim;
     }
     
     void TriggerSlide(LauncherAnimator* anim, unsigned long ptr, int fx, int tx, int dur) {
