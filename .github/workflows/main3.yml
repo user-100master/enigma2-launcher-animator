@@ -1,0 +1,25 @@
+name: Cross-Compile Enigma2 SO
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Clone Official openATV Enigma2 Source Core (For Real Headers)
+        run: |
+          git clone --depth 1 https://github.com atv_source
+
+      - name: Install ARM Toolchain Compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-arm-linux-gnueabihf
+
+      - name: Compile Native C++ Timer Engine Module
+        run: |
+          arm-linux-gnueabihf-g++ -O3 -shared -fPIC \
+            -march=armv7-a -mfloat-abi=hard -mfpu=neon-vfpv4 \
+            -o liblauncher_anim.so LauncherAnimator.cpp \
+            -I./atv_source
