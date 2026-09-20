@@ -1,0 +1,26 @@
+name: Cross-Compile Enigma2 SO
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install ARM Toolchain Compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-arm-linux-gnueabihf
+
+      - name: Compile Library Natively for Qviart Dual 4K
+        run: |
+          arm-linux-gnueabihf-g++ -O3 -shared -fPIC \
+            -march=armv7-a -mfloat-abi=hard -mfpu=neon-vfpv4 \
+            -o liblauncher_anim.so LauncherAnimator.cpp
+
+      - name: Upload Finished Compiled Binary File
+        uses: actions/upload-artifact@v4
+        with:
+          name: liblauncher_anim_so
+          path: liblauncher_anim.so
