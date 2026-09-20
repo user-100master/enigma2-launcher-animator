@@ -1,10 +1,31 @@
-#include <lib/gui/ewidget.h>
-#include <lib/base/etimer.h>
-#include <lib/base/ebase.h>
 #include <time.h>
 #include <vector>
+#include <thread>
+#include <mutex>
+#include <chrono>
 
-// Structure to track separate animation parameters for individual tile widgets
+// Minimal structural definitions for Enigma2 coordinate spaces
+class ePoint {
+public:
+    int m_x, m_y;
+    ePoint(int x, int y) : m_x(x), m_y(y) {}
+};
+
+class eSize {
+public:
+    int m_width, m_height;
+    eSize(int w, int h) : m_width(w), m_height(h) {}
+};
+
+class eWidget {
+public:
+    virtual ~eWidget() {}
+    virtual void move(const ePoint &p) = 0;
+    virtual void resize(const eSize &s) = 0;
+    virtual ePoint position() = 0;
+    virtual eSize size() = 0;
+};
+
 struct TileAnimationData {
     eWidget* targetWidget;
     float startX;
@@ -17,22 +38,74 @@ struct TileAnimationData {
 
 class LauncherAnimator {
 private:
-    eTimer* m_animation_timer;
     std::vector<TileAnimationData> m_active_animations;
+    std::mutex m_mutex;
+    std::thread m_worker_thread;
+    bool m_loop_running;
 
-public:
-    LauncherAnimator() {
-        // Instantiate Enigma2 C++ core eTimer hooked directly into the main loop application thread
-        m_animation_timer = new eTimer(eApp);
-        
-        // Connect the timer timeout event straight to our local calculation loop tick step
-        m_animation_timer->timeout.connect(slot(*this, &LauncherAnimator::timerTick));
+    void animationThreadLoop() {
+        while (m_loop_running) {
+            auto loop_start = std::chrono::steady_clock::now();
+            
+            struct timespec currentTime;
+            clock_gettime(CLOCK_MONOTONIC, &currentTime);
+
+            m_mutex.lock();
+            if (m_active_animations.empty()) {
+                m_loop_running = false;
+                m_mutex.unlock();
+                break;
+            }
+
+            for (auto it = m_active_animations.begin(); it != m_active_animations.end(); ) {
+                if (!it->targetWidget) {
+                    it = m_active_animations.erase(it);
+                    continue;
+                }
+
+                float elapsed = (currentTime.tv_sec - it->startTime.tv_sec) + 
+                                (currentTime.tv_nsec - it->startTime.tv_nsec) / 1000000000.0f;
+
+                if (elapsed >= it->durationSeconds) {
+                    try {
+                        it->targetWidget->move(ePoint((int)it->targetX, it->targetY));
+                    } catch (...) {}
+                    it = m_active_animations.erase(it);
+                } else {
+                    float progress = elapsed / it->durationSeconds;
+                    // PREMIUM CUBIC EASE-OUT SMOOTH CURVE MATH
+                    float eased = 1.0f - (1.0f - progress) * (1.0f - progress) * (1.0f - progress);
+                    
+                    it->currentX = it->startX + (it->targetX - it->startX) * eased;
+
+                    try {
+                        it->targetWidget->move(ePoint((int)it->currentX, it->targetY));
+                    } catch (...) {
+                        it = m_active_animations.erase(it);
+                        continue;
+                    }
+                    ++it;
+                }
+            }
+            m_mutex.unlock();
+
+            // Enforce a strict 60 FPS cadence cycle (16.6ms frame step spacing)
+            auto loop_end = std::chrono::steady_clock::now();
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(loop_end - loop_start).count();
+            if (elapsed_ms < 16) {
+                // Sleep remaining milliseconds to keep execution completely fluid
+                std::this_thread::sleep_for(std::chrono::milliseconds(16 - elapsed_ms));
+            }
+        }
     }
 
+public:
+    LauncherAnimator() : m_loop_running(false) {}
+
     ~LauncherAnimator() {
-        if (m_animation_timer) {
-            m_animation_timer->stop();
-            delete m_animation_timer;
+        m_loop_running = false;
+        if (m_worker_thread.joinable()) {
+            m_worker_thread.join();
         }
         m_active_animations.clear();
     }
@@ -41,7 +114,7 @@ public:
         eWidget* widget = (eWidget*)widgetPointer;
         if (!widget) return;
 
-        // Remove any existing active animations for this specific widget pointer to avoid coordinate fights
+        m_mutex.lock();
         for (auto it = m_active_animations.begin(); it != m_active_animations.end(); ) {
             if (it->targetWidget == widget) {
                 it = m_active_animations.erase(it);
@@ -56,67 +129,27 @@ public:
         anim.targetX = (float)toX;
         anim.currentX = anim.startX;
         anim.durationSeconds = (float)durationMs / 1000.0f;
-        anim.targetY = widget->position().y(); // Freeze current Y alignment to ensure it slides strictly on X axis
+        try {
+            anim.targetY = widget->position().m_y;
+        } catch (...) {
+            anim.targetY = 0;
+        }
         clock_gettime(CLOCK_MONOTONIC, &anim.startTime);
 
         m_active_animations.push_back(anim);
 
-        // Wake up the hardware timer loop if it isn't running
-        if (!m_animation_timer->isActive()) {
-            m_animation_timer->start(16, true);
-        }
-    }
-
-    void timerTick() {
-        struct timespec currentTime;
-        clock_gettime(CLOCK_MONOTONIC, &currentTime);
-
-        // Vector iterator to track and update all active animations simultaneously
-        for (auto it = m_active_animations.begin(); it != m_active_animations.end(); ) {
-            if (!it->targetWidget) {
-                it = m_active_animations.erase(it);
-                continue;
+        if (!m_loop_running) {
+            m_loop_running = true;
+            if (m_worker_thread.joinable()) {
+                m_worker_thread.join();
             }
-
-            // High-precision fractional elapsed time calculation via float math
-            float elapsed = (currentTime.tv_sec - it->startTime.tv_sec) + 
-                            (currentTime.tv_nsec - it->startTime.tv_nsec) / 1000000000.0f;
-
-            if (elapsed >= it->durationSeconds) {
-                // Hard-lock final layout bounds once destination target is achieved
-                try {
-                    it->targetWidget->move(ePoint((int)it->targetX, it->targetY));
-                } catch (...) {}
-                it = m_active_animations.erase(it); // Remove completed animation from queue
-            } else {
-                float progress = elapsed / it->durationSeconds;
-                
-                // PREMIUM CUBIC EASE-OUT SMOOTH CURVE MATH (Calculated natively)
-                float eased = 1.0f - (1.0f - progress) * (1.0f - progress) * (1.0f - progress);
-                
-                it->currentX = it->startX + (it->targetX - it->startX) * eased;
-
-                try {
-                    // Push direct sub-coordinate updates to the Mali framebuffer canvas
-                    it->targetWidget->move(ePoint((int)it->currentX, it->targetY));
-                } catch (...) {
-                    it = m_active_animations.erase(it);
-                    continue;
-                }
-                ++it;
-            }
+            // Fire off a native hardware background thread 
+            m_worker_thread = std::thread(&LauncherAnimator::animationThreadLoop, this);
         }
-
-        // Keep driving the internal C++ eTimer loop if animations are still running
-        if (!m_active_animations.empty()) {
-            m_animation_timer->start(16, true); // Stays locked at 16ms (60 FPS target refresh matching TV VSync)
-        } else {
-            m_animation_timer->stop();
-        }
+        m_mutex.unlock();
     }
 };
 
-// Exported Python C-Linkage Interface Hooks
 extern "C" {
     LauncherAnimator* NewAnimator() { 
         return new LauncherAnimator(); 
