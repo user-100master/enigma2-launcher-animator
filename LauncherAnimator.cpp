@@ -1,165 +1,85 @@
 #include <time.h>
 #include <vector>
-#include <thread>
-#include <mutex>
-#include <chrono>
-
-// Minimal structural definitions for Enigma2 coordinate spaces
-class ePoint {
-public:
-    int m_x, m_y;
-    ePoint(int x, int y) : m_x(x), m_y(y) {}
-};
-
-class eSize {
-public:
-    int m_width, m_height;
-    eSize(int w, int h) : m_width(w), m_height(h) {}
-};
-
-class eWidget {
-public:
-    virtual ~eWidget() {}
-    virtual void move(const ePoint &p) = 0;
-    virtual void resize(const eSize &s) = 0;
-    virtual ePoint position() = 0;
-    virtual eSize size() = 0;
-};
 
 struct TileAnimationData {
-    eWidget* targetWidget;
+    int id;
     float startX;
     float targetX;
     float currentX;
     struct timespec startTime;
     float durationSeconds;
-    int targetY;
+    bool isFinished;
 };
 
 class LauncherAnimator {
 private:
-    std::vector<TileAnimationData> m_active_animations;
-    std::mutex m_mutex;
-    std::thread m_worker_thread;
-    bool m_loop_running;
-
-    void animationThreadLoop() {
-        while (m_loop_running) {
-            auto loop_start = std::chrono::steady_clock::now();
-            
-            struct timespec currentTime;
-            clock_gettime(CLOCK_MONOTONIC, &currentTime);
-
-            m_mutex.lock();
-            if (m_active_animations.empty()) {
-                m_loop_running = false;
-                m_mutex.unlock();
-                break;
-            }
-
-            for (auto it = m_active_animations.begin(); it != m_active_animations.end(); ) {
-                if (!it->targetWidget) {
-                    it = m_active_animations.erase(it);
-                    continue;
-                }
-
-                float elapsed = (currentTime.tv_sec - it->startTime.tv_sec) + 
-                                (currentTime.tv_nsec - it->startTime.tv_nsec) / 1000000000.0f;
-
-                if (elapsed >= it->durationSeconds) {
-                    try {
-                        it->targetWidget->move(ePoint((int)it->targetX, it->targetY));
-                    } catch (...) {}
-                    it = m_active_animations.erase(it);
-                } else {
-                    float progress = elapsed / it->durationSeconds;
-                    // PREMIUM CUBIC EASE-OUT SMOOTH CURVE MATH
-                    float eased = 1.0f - (1.0f - progress) * (1.0f - progress) * (1.0f - progress);
-                    
-                    it->currentX = it->startX + (it->targetX - it->startX) * eased;
-
-                    try {
-                        it->targetWidget->move(ePoint((int)it->currentX, it->targetY));
-                    } catch (...) {
-                        it = m_active_animations.erase(it);
-                        continue;
-                    }
-                    ++it;
-                }
-            }
-            m_mutex.unlock();
-
-            // Enforce a strict 60 FPS cadence cycle (16.6ms frame step spacing)
-            auto loop_end = std::chrono::steady_clock::now();
-            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(loop_end - loop_start).count();
-            if (elapsed_ms < 16) {
-                // Sleep remaining milliseconds to keep execution completely fluid
-                std::this_thread::sleep_for(std::chrono::milliseconds(16 - elapsed_ms));
-            }
-        }
-    }
+    std::vector<TileAnimationData> m_animations;
 
 public:
-    LauncherAnimator() : m_loop_running(false) {}
+    LauncherAnimator() {}
 
-    ~LauncherAnimator() {
-        m_loop_running = false;
-        if (m_worker_thread.joinable()) {
-            m_worker_thread.join();
-        }
-        m_active_animations.clear();
-    }
-
-    void startSlide(unsigned long widgetPointer, int fromX, int toX, int durationMs) {
-        eWidget* widget = (eWidget*)widgetPointer;
-        if (!widget) return;
-
-        m_mutex.lock();
-        for (auto it = m_active_animations.begin(); it != m_active_animations.end(); ) {
-            if (it->targetWidget == widget) {
-                it = m_active_animations.erase(it);
-            } else {
-                ++it;
+    void startSlide(int tileId, int fromX, int toX, int durationMs) {
+        // Erase any older animation with the same ID to prevent layout fights
+        for (size_t i = 0; i < m_animations.size(); ++i) {
+            if (m_animations[i].id == tileId) {
+                m_animations.erase(m_animations.begin() + i);
+                break;
             }
         }
 
         TileAnimationData anim;
-        anim.targetWidget = widget;
+        anim.id = tileId;
         anim.startX = (float)fromX;
         anim.targetX = (float)toX;
         anim.currentX = anim.startX;
         anim.durationSeconds = (float)durationMs / 1000.0f;
-        try {
-            anim.targetY = widget->position().m_y;
-        } catch (...) {
-            anim.targetY = 0;
-        }
+        anim.isFinished = false;
         clock_gettime(CLOCK_MONOTONIC, &anim.startTime);
 
-        m_active_animations.push_back(anim);
+        m_animations.push_back(anim);
+    }
 
-        if (!m_loop_running) {
-            m_loop_running = true;
-            if (m_worker_thread.joinable()) {
-                m_worker_thread.join();
+    // HIGH SPEED MATHEMATICAL TICK ENGINE
+    // Calculates float positions for all running tiles instantly
+    int updateCalculations(int tileId) {
+        struct timespec currentTime;
+        clock_gettime(CLOCK_MONOTONIC, &currentTime);
+
+        for (auto& anim : m_animations) {
+            if (anim.id == tileId) {
+                if (anim.isFinished) return (int)anim.targetX;
+
+                float elapsed = (currentTime.tv_sec - anim.startTime.tv_sec) + 
+                                (currentTime.tv_nsec - anim.startTime.tv_nsec) / 1000000000.0f;
+
+                if (elapsed >= anim.durationSeconds) {
+                    anim.isFinished = true;
+                    return (int)anim.targetX;
+                }
+
+                float progress = elapsed / anim.durationSeconds;
+                
+                // PREMIUM CUBIC EASE-OUT MATH (Android UI Style)
+                float eased = 1.0f - (1.0f - progress) * (1.0f - progress) * (1.0f - progress);
+                anim.currentX = anim.startX + (anim.targetX - anim.startX) * eased;
+                
+                return (int)anim.currentX;
             }
-            // Fire off a native hardware background thread 
-            m_worker_thread = std::thread(&LauncherAnimator::animationThreadLoop, this);
         }
-        m_mutex.unlock();
+        return -1; // Animation not found or completed
     }
 };
 
 extern "C" {
-    LauncherAnimator* NewAnimator() { 
-        return new LauncherAnimator(); 
+    LauncherAnimator* NewAnimator() { return new LauncherAnimator(); }
+    void DeleteAnimator(LauncherAnimator* anim) { if (anim) delete anim; }
+    
+    void TriggerSlide(LauncherAnimator* anim, int tileId, int fx, int tx, int dur) {
+        if (anim) anim->startSlide(tileId, fx, tx, dur);
     }
     
-    void DeleteAnimator(LauncherAnimator* anim) {
-        if (anim) delete anim;
-    }
-    
-    void TriggerSlide(LauncherAnimator* anim, unsigned long ptr, int fx, int tx, int dur) {
-        if (anim) anim->startSlide(ptr, fx, tx, dur);
+    int GetCurrentFrameX(LauncherAnimator* anim, int tileId) {
+        if (anim) return anim->updateCalculations(tileId);
+        return -1;
     }
 }
