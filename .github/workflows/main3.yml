@@ -1,25 +1,41 @@
-name: Cross-Compile Enigma2 SO
-on: [push, workflow_dispatch]
+# .github/workflows/build-armv7.yml
+name: Build ARMv7 Asynchronous TDE Engine
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
-  build:
+  build-armv7:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Clone Official openATV Enigma2 Source Core (For Real Headers)
-        run: |
-          git clone --depth 1 https://github.com atv_source
+      - name: Set up QEMU for Cross-Compilation
+        uses: docker/setup-qemu-action@v3
 
-      - name: Install ARM Toolchain Compiler
+      - name: Install Toolchain Environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++-arm-linux-gnueabihf
+          sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf cmake
 
-      - name: Compile Native C++ Timer Engine Module
+      - name: Compile Threaded Shared Library for Qviart Dual (Cortex-A15 Hard Float)
         run: |
-          arm-linux-gnueabihf-g++ -O3 -shared -fPIC \
-            -march=armv7-a -mfloat-abi=hard -mfpu=neon-vfpv4 \
-            -o liblauncher_anim.so LauncherAnimator.cpp \
-            -I./atv_source
+          arm-linux-gnueabihf-g++ -shared -fPIC -O3 \
+            -march=armv7-a -mcpu=cortex-a15 -mfpu=neon-vfpv4 -mfloat-abi=hard \
+            -D_GNU_SOURCE \
+            launcher_tde.cpp -o liblauncher_anim.so \
+            -lpthread -ldl
+
+      - name: Verify Architecture Layout
+        run: |
+          arm-linux-gnueabihf-readelf -h liblauncher_anim.so
+
+      - name: Upload Build Artifact
+        uses: actions/artifacts-upload@v4
+        with:
+          name: liblauncher_anim-armv7
+          path: liblauncher_anim.so
