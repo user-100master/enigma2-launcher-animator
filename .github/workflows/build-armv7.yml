@@ -1,0 +1,41 @@
+# .github/workflows/build-armv7.yml
+name: Build ARMv7 Asynchronous TDE Engine
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-armv7:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU for Cross-Compilation
+        uses: docker/setup-qemu-action@v3
+
+      - name: Install Toolchain Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf cmake
+
+      - name: Compile Threaded Shared Library for Qviart Dual (Cortex-A15 Hard Float)
+        run: |
+          arm-linux-gnueabihf-g++ -shared -fPIC -O3 \
+            -march=armv7-a -mcpu=cortex-a15 -mfpu=neon-vfpv4 -mfloat-abi=hard \
+            -D_GNU_SOURCE \
+            LauncherAnimator.cpp -o liblauncher_anim.so \
+            -lpthread -ldl
+
+      - name: Verify Architecture Layout
+        run: |
+          arm-linux-gnueabihf-readelf -h liblauncher_anim.so
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: liblauncher_anim-armv7
+          path: liblauncher_anim.so
