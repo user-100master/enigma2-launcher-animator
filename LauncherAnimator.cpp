@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/time.h>   
 #include <linux/fb.h>
 #include <dlfcn.h>      
 #include <pthread.h>    
@@ -9,6 +10,7 @@
 #include <cmath>
 #include <vector>
 #include <iostream>
+#include <cstdint>      // FIXED: Resolves all 'uint32_t does not name a type' errors
 
 typedef int32_t HI_HANDLE;
 
@@ -101,75 +103,82 @@ public:
     bool isHardwareActive() const { return m_use_hardware && m_fb_mem != MAP_FAILED; }
     uint32_t getPhysAddr() const { return m_fb_phys_addr; }
 
-    static void* runAnimationThread(void* arg) {
-        ThreadedAnimParams* p = reinterpret_cast<ThreadedAnimParams*>(arg);
-        LauncherAnimator* self = reinterpret_cast<LauncherAnimator*>(p->animator_instance);
+    void startAsyncHardwareSlide(int fromX, int toX, int currentY, int width, int height, int durationMs);
+};
 
-        struct timespec startTime, currentTime;
-        clock_gettime(CLOCK_MONOTONIC, &startTime);
-        float durationSec = static_cast<float>(p->durationMs) / 1000.0f;
-        
-        int oldX = p->fromX;
-        bool finished = false;
+// Isolated global C-style routing wrapper ensuring flawless static compilation
+void* runAnimationThreadInternal(void* arg) {
+    ThreadedAnimParams* p = reinterpret_cast<ThreadedAnimParams*>(arg);
+    LauncherAnimator* self = reinterpret_cast<LauncherAnimator*>(p->animator_instance);
 
-        TDE_SURFACE_S surf = { self->getPhysAddr(), 0, 1920, 1080, 1920 * 4 };
-        TDE_OPT_S opts = { 255, 0, {0, 0, 0, 0} };
+    struct timespec startTime, currentTime;
+    clock_gettime(CLOCK_MONOTONIC, &startTime);
+    float durationSec = static_cast<float>(p->durationMs) / 1000.0f;
+    
+    int oldX = p->fromX;
+    bool finished = false;
 
-        while (!finished) {
-            clock_gettime(CLOCK_MONOTONIC, &startTime);
-            float elapsed = (currentTime.tv_sec - startTime.tv_sec) + 
-                            (currentTime.tv_nsec - startTime.tv_nsec) / 1000000000.0f;
+    TDE_SURFACE_S surf = { self->getPhysAddr(), 0, 1920, 1080, 1920 * 4 };
+    
+    // FIXED: Properly nested initializer arrays targeting layout clipping rules
+    TDE_RECT_S zeroClip = { 0, 0, 0, 0 };
+    TDE_OPT_S opts = { 255, 0, zeroClip };
 
-            if (elapsed >= durationSec) {
-                elapsed = durationSec;
-                finished = true;
-            }
+    while (!finished) {
+        clock_gettime(CLOCK_MONOTONIC, &currentTime);
+        float elapsed = (currentTime.tv_sec - startTime.tv_sec) + 
+                        (currentTime.tv_nsec - startTime.tv_nsec) / 1000000000.0f;
 
-            float progress = elapsed / durationSec;
-            float eased = 1.0f - (1.0f - progress) * (1.0f - progress) * (1.0f - progress);
-            int newX = static_cast<int>(p->fromX + (p->toX - p->fromX) * eased);
-
-            if (oldX != newX) {
-                if (self->isHardwareActive()) {
-                    TDE_RECT_S srcRect = { oldX, p->currentY, (uint32_t)p->width, (uint32_t)p->height };
-                    TDE_RECT_S dstRect = { newX, p->currentY, (uint32_t)p->width, (uint32_t)p->height };
-
-                    HI_HANDLE job = self->TDE_BeginJob();
-                    if (job) {
-                        self->TDE_Bitblit(job, &surf, &srcRect, &surf, &dstRect, &opts);
-                        self->TDE_EndJob(job, true, 10);
-                    }
-                }
-                oldX = newX;
-            }
-
-            if (!finished) {
-                struct timespec sleepTime;
-                sleepTime.tv_sec = 0;
-                sleepTime.tv_nsec = 16666666; 
-                nanosleep(&sleepTime, nullptr);
-            }
+        if (elapsed >= durationSec) {
+            elapsed = durationSec;
+            finished = true;
         }
 
-        delete p;
-        return nullptr;
+        float progress = elapsed / durationSec;
+        float eased = 1.0f - (1.0f - progress) * (1.0f - progress) * (1.0f - progress);
+        int newX = static_cast<int>(p->fromX + (p->toX - p->fromX) * eased);
+
+        if (oldX != newX) {
+            if (self->isHardwareActive()) {
+                // FIXED: Explicitly cast parameters to matching structure metrics
+                TDE_RECT_S srcRect = { oldX, p->currentY, static_cast<uint32_t>(p->width), static_cast<uint32_t>(p->height) };
+                TDE_RECT_S dstRect = { newX, p->currentY, static_cast<uint32_t>(p->width), static_cast<uint32_t>(p->height) };
+
+                HI_HANDLE job = self->TDE_BeginJob();
+                if (job) {
+                    self->TDE_Bitblit(job, &surf, &srcRect, &surf, &dstRect, &opts);
+                    self->TDE_EndJob(job, true, 10);
+                }
+            }
+            oldX = newX;
+        }
+
+        if (!finished) {
+            struct timespec sleepTime;
+            sleepTime.tv_sec = 0;
+            sleepTime.tv_nsec = 16666666; 
+            nanosleep(&sleepTime, nullptr);
+        }
     }
 
-    void startAsyncHardwareSlide(int fromX, int toX, int currentY, int width, int height, int durationMs) {
-        ThreadedAnimParams* params = new ThreadedAnimParams();
-        params->animator_instance = this;
-        params->fromX = fromX;
-        params->toX = toX;
-        params->currentY = currentY;
-        params->width = width;
-        params->height = height;
-        params->durationMs = durationMs;
+    delete p;
+    return nullptr;
+}
 
-        pthread_t threadId;
-        pthread_create(&threadId, nullptr, LauncherAnimator::runAnimationThread, params);
-        pthread_detach(threadId); 
-    }
-};
+void LauncherAnimator::startAsyncHardwareSlide(int fromX, int toX, int currentY, int width, int height, int durationMs) {
+    ThreadedAnimParams* params = new ThreadedAnimParams();
+    params->animator_instance = this;
+    params->fromX = fromX;
+    params->toX = toX;
+    params->currentY = currentY;
+    params->width = width;
+    params->height = height;
+    params->durationMs = durationMs;
+
+    pthread_t threadId;
+    pthread_create(&threadId, nullptr, runAnimationThreadInternal, params);
+    pthread_detach(threadId); 
+}
 
 extern "C" {
     LauncherAnimator* NewAnimator() { return new LauncherAnimator(); }
