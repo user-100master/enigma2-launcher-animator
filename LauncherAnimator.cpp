@@ -3,8 +3,8 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <linux/fb.h>
-#include <dlfcn.h>      // REQUIRED: Resolves dlopen/dlsym compilation errors
-#include <pthread.h>    // REQUIRED: Resolves pthread thread errors
+#include <dlfcn.h>      
+#include <pthread.h>    
 #include <time.h>
 #include <cmath>
 #include <vector>
@@ -143,7 +143,7 @@ public:
             if (!finished) {
                 struct timespec sleepTime;
                 sleepTime.tv_sec = 0;
-                sleepTime.tv_nsec = 16666666; // 16.6ms frame intervals (~60 FPS)
+                sleepTime.tv_nsec = 16666666; 
                 nanosleep(&sleepTime, nullptr);
             }
         }
