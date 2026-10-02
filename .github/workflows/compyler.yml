@@ -3,7 +3,7 @@ on: [push, workflow_dispatch]
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -17,7 +17,8 @@ jobs:
         run: |
           arm-linux-gnueabihf-g++ -O3 -shared -fPIC \
             -march=armv7-a -mfloat-abi=hard -mfpu=neon-vfpv4 \
-            -o liblauncher_anim.so LauncherAnimator.cpp
+            -o liblauncher_anim.so LauncherAnimator.cpp \
+            -lpthread -ldl
 
       - name: Upload Finished Compiled Binary File
         uses: actions/upload-artifact@v4
