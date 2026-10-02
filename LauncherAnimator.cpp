@@ -1,15 +1,13 @@
-// launcher_tde.cpp
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <linux/fb.h>
-#include <dlfcn.h>
-#include <pthread.h>
+#include <dlfcn.h>      // REQUIRED: Resolves dlopen/dlsym compilation errors
+#include <pthread.h>    // REQUIRED: Resolves pthread thread errors
 #include <time.h>
 #include <cmath>
 #include <vector>
-#include <algorithm>
 
 typedef int32_t HI_HANDLE;
 
@@ -102,7 +100,6 @@ public:
     bool isHardwareActive() const { return m_use_hardware && m_fb_mem != MAP_FAILED; }
     uint32_t getPhysAddr() const { return m_fb_phys_addr; }
 
-    // Asynchronous loop running strictly on a native low-level background thread
     static void* runAnimationThread(void* arg) {
         ThreadedAnimParams* p = reinterpret_cast<ThreadedAnimParams*>(arg);
         LauncherAnimator* self = reinterpret_cast<LauncherAnimator*>(p->animator_instance);
@@ -137,18 +134,16 @@ public:
 
                 HI_HANDLE job = self->TDE_BeginJob();
                 if (job) {
-                    // Direct hardware command execution block bypassing the OS window architecture
                     self->TDE_Bitblit(job, &surf, &srcRect, &surf, &dstRect, &opts);
                     self->TDE_EndJob(job, true, 10);
                 }
                 oldX = newX;
             }
 
-            // Precisely lock the background thread cadence to ~60 FPS (16.6 milliseconds sleep intervals)
             if (!finished) {
                 struct timespec sleepTime;
                 sleepTime.tv_sec = 0;
-                sleepTime.tv_nsec = 16666666;
+                sleepTime.tv_nsec = 16666666; // 16.6ms frame intervals (~60 FPS)
                 nanosleep(&sleepTime, nullptr);
             }
         }
@@ -171,7 +166,7 @@ public:
 
         pthread_t threadId;
         pthread_create(&threadId, nullptr, LauncherAnimator::runAnimationThread, params);
-        pthread_detach(threadId); // Instantly detach so system cleans up memory assets automatically on complete
+        pthread_detach(threadId); 
     }
 };
 
