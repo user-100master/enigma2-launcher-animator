@@ -27,7 +27,7 @@ jobs:
           arm-linux-gnueabihf-g++ -shared -fPIC -O3 \
             -march=armv7-a -mcpu=cortex-a15 -mfpu=neon-vfpv4 -mfloat-abi=hard \
             -D_GNU_SOURCE \
-            launcher_tde.cpp -o liblauncher_anim.so \
+            LauncherAnimator.cpp -o liblauncher_anim.so \
             -lpthread -ldl
 
       - name: Verify Architecture Layout
@@ -35,7 +35,7 @@ jobs:
           arm-linux-gnueabihf-readelf -h liblauncher_anim.so
 
       - name: Upload Build Artifact
-        uses: actions/artifacts-upload@v4
+        uses: actions/upload-artifact@v4
         with:
           name: liblauncher_anim-armv7
           path: liblauncher_anim.so
