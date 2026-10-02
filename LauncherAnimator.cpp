@@ -8,6 +8,7 @@
 #include <time.h>
 #include <cmath>
 #include <vector>
+#include <iostream>
 
 typedef int32_t HI_HANDLE;
 
@@ -115,7 +116,7 @@ public:
         TDE_OPT_S opts = { 255, 0, {0, 0, 0, 0} };
 
         while (!finished) {
-            clock_gettime(CLOCK_MONOTONIC, &currentTime);
+            clock_gettime(CLOCK_MONOTONIC, &startTime);
             float elapsed = (currentTime.tv_sec - startTime.tv_sec) + 
                             (currentTime.tv_nsec - startTime.tv_nsec) / 1000000000.0f;
 
@@ -129,13 +130,15 @@ public:
             int newX = static_cast<int>(p->fromX + (p->toX - p->fromX) * eased);
 
             if (oldX != newX) {
-                TDE_RECT_S srcRect = { oldX, p->currentY, (uint32_t)p->width, (uint32_t)p->height };
-                TDE_RECT_S dstRect = { newX, p->currentY, (uint32_t)p->width, (uint32_t)p->height };
+                if (self->isHardwareActive()) {
+                    TDE_RECT_S srcRect = { oldX, p->currentY, (uint32_t)p->width, (uint32_t)p->height };
+                    TDE_RECT_S dstRect = { newX, p->currentY, (uint32_t)p->width, (uint32_t)p->height };
 
-                HI_HANDLE job = self->TDE_BeginJob();
-                if (job) {
-                    self->TDE_Bitblit(job, &surf, &srcRect, &surf, &dstRect, &opts);
-                    self->TDE_EndJob(job, true, 10);
+                    HI_HANDLE job = self->TDE_BeginJob();
+                    if (job) {
+                        self->TDE_Bitblit(job, &surf, &srcRect, &surf, &dstRect, &opts);
+                        self->TDE_EndJob(job, true, 10);
+                    }
                 }
                 oldX = newX;
             }
@@ -153,8 +156,6 @@ public:
     }
 
     void startAsyncHardwareSlide(int fromX, int toX, int currentY, int width, int height, int durationMs) {
-        if (!isHardwareActive()) return;
-
         ThreadedAnimParams* params = new ThreadedAnimParams();
         params->animator_instance = this;
         params->fromX = fromX;
