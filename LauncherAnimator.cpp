@@ -5,7 +5,6 @@
 #include <sys/time.h>   
 #include <linux/fb.h>
 #include <dlfcn.h>      
-#include <pthread.h>    
 #include <time.h>
 #include <cmath>
 #include <vector>
@@ -35,40 +34,40 @@ struct TDE_OPT_S {
     TDE_RECT_S clip_rect;
 };
 
+struct TileAnimationData {
+    int id;
+    float startX;
+    float targetX;
+    float currentX;
+    struct timespec startTime;
+    float durationSeconds;
+    bool isFinished;
+};
+
 typedef int (*HI_TDE_Open_t)();
 typedef void (*HI_TDE_Close_t)();
 typedef HI_HANDLE (*HI_TDE_BeginJob_t)();
 typedef int (*HI_TDE_Bitblit_t)(HI_HANDLE, const TDE_SURFACE_S*, const TDE_RECT_S*, const TDE_SURFACE_S*, const TDE_RECT_S*, const TDE_OPT_S*);
 typedef int (*HI_TDE_EndJob_t)(HI_HANDLE, bool, uint32_t);
 
-struct ThreadedAnimParams {
-    void* animator_instance;
-    int fromX;
-    int toX;
-    int currentY;
-    int width;
-    int height;
-    int durationMs;
-};
-
 class LauncherAnimator {
 private:
+    std::vector<TileAnimationData> m_animations;
     void* m_tde_handle;
     int m_fb_fd;
     uint32_t* m_fb_mem;
     size_t m_fb_size;
     uint32_t m_fb_phys_addr;
     bool m_use_hardware;
-    
-public:
-    volatile bool m_thread_running; // Thread safety flag
+
     HI_TDE_Open_t TDE_Open;
     HI_TDE_Close_t TDE_Close;
     HI_TDE_BeginJob_t TDE_BeginJob;
     HI_TDE_Bitblit_t TDE_Bitblit;
     HI_TDE_EndJob_t TDE_EndJob;
 
-    LauncherAnimator() : m_tde_handle(nullptr), m_fb_fd(-1), m_fb_mem((uint32_t*)MAP_FAILED), m_use_hardware(false), m_thread_running(false) {
+public:
+    LauncherAnimator() : m_tde_handle(nullptr), m_fb_fd(-1), m_fb_mem((uint32_t*)MAP_FAILED), m_use_hardware(false) {
         m_fb_fd = open("/dev/fb0", O_RDWR);
         if (m_fb_fd >= 0) {
             struct fb_var_screeninfo vinfo;
@@ -101,94 +100,85 @@ public:
         if (m_fb_fd >= 0) close(m_fb_fd);
     }
 
-    bool isHardwareActive() const { return m_use_hardware && m_fb_mem != MAP_FAILED; }
-    uint32_t getPhysAddr() const { return m_fb_phys_addr; }
-
-    void startAsyncHardwareSlide(int fromX, int toX, int currentY, int width, int height, int durationMs);
-};
-
-void* runAnimationThreadInternal(void* arg) {
-    ThreadedAnimParams* p = reinterpret_cast<ThreadedAnimParams*>(arg);
-    LauncherAnimator* self = reinterpret_cast<LauncherAnimator*>(p->animator_instance);
-
-    struct timespec startTime, currentTime;
-    clock_gettime(CLOCK_MONOTONIC, &startTime);
-    float durationSec = static_cast<float>(p->durationMs) / 1000.0f;
-    
-    int oldX = p->fromX;
-    bool finished = false;
-
-    TDE_SURFACE_S surf = { self->getPhysAddr(), 0, 1920, 1080, 1920 * 4 };
-    TDE_RECT_S zeroClip = { 0, 0, 0, 0 };
-    TDE_OPT_S opts = { 255, 0, zeroClip };
-
-    while (!finished) {
-        clock_gettime(CLOCK_MONOTONIC, &currentTime);
-        float elapsed = (currentTime.tv_sec - startTime.tv_sec) + 
-                        (currentTime.tv_nsec - startTime.tv_nsec) / 1000000000.0f;
-
-        if (elapsed >= durationSec) {
-            elapsed = durationSec;
-            finished = true;
-        }
-
-        float progress = elapsed / durationSec;
-        float eased = 1.0f - (1.0f - progress) * (1.0f - progress) * (1.0f - progress);
-        int newX = static_cast<int>(p->fromX + (p->toX - p->fromX) * eased);
-
-        if (oldX != newX) {
-            if (self->isHardwareActive()) {
-                TDE_RECT_S srcRect = { oldX, p->currentY, static_cast<uint32_t>(p->width), static_cast<uint32_t>(p->height) };
-                TDE_RECT_S dstRect = { newX, p->currentY, static_cast<uint32_t>(p->width), static_cast<uint32_t>(p->height) };
-
-                HI_HANDLE job = self->TDE_BeginJob();
-                if (job) {
-                    self->TDE_Bitblit(job, &surf, &srcRect, &surf, &dstRect, &opts);
-                    self->TDE_EndJob(job, true, 10);
-                }
+    void startSlide(int tileId, int fromX, int toX, int durationMs) {
+        for (size_t i = 0; i < m_animations.size(); ++i) {
+            if (m_animations[i].id == tileId) {
+                m_animations.erase(m_animations.begin() + i);
+                break;
             }
-            oldX = newX;
         }
-
-        if (!finished) {
-            struct timespec sleepTime;
-            sleepTime.tv_sec = 0;
-            sleepTime.tv_nsec = 16666666; 
-            nanosleep(&sleepTime, nullptr);
-        }
+        TileAnimationData anim;
+        anim.id = tileId;
+        anim.startX = (float)fromX;
+        anim.targetX = (float)toX;
+        anim.currentX = anim.startX;
+        anim.durationSeconds = (float)durationMs / 1000.0f;
+        anim.isFinished = false;
+        clock_gettime(CLOCK_MONOTONIC, &anim.startTime);
+        m_animations.push_back(anim);
     }
 
-    self->m_thread_running = false; // Toggle complete status cleanly
-    delete p;
-    return nullptr;
-}
+    int updateCalculationsAdvanced(int tileId, int currentY, int width, int height) {
+        struct timespec currentTime;
+        clock_gettime(CLOCK_MONOTONIC, &currentTime);
 
-void LauncherAnimator::startAsyncHardwareSlide(int fromX, int toX, int currentY, int width, int height, int durationMs) {
-    m_thread_running = true;
-    ThreadedAnimParams* params = new ThreadedAnimParams();
-    params->animator_instance = this;
-    params->fromX = fromX;
-    params->toX = toX;
-    params->currentY = currentY;
-    params->width = width;
-    params->height = height;
-    params->durationMs = durationMs;
+        for (size_t i = 0; i < m_animations.size(); ++i) {
+            if (m_animations[i].id == tileId) {
+                if (m_animations[i].isFinished) {
+                    int finalX = (int)m_animations[i].targetX;
+                    m_animations.erase(m_animations.begin() + i);
+                    return finalX;
+                }
 
-    pthread_t threadId;
-    pthread_create(&threadId, nullptr, runAnimationThreadInternal, params);
-    pthread_detach(threadId); 
-}
+                float elapsed = (currentTime.tv_sec - m_animations[i].startTime.tv_sec) + 
+                                (currentTime.tv_nsec - m_animations[i].startTime.tv_nsec) / 1000000000.0f;
+
+                int oldX = (int)m_animations[i].currentX;
+
+                if (elapsed >= m_animations[i].durationSeconds) {
+                    m_animations[i].isFinished = true;
+                    m_animations[i].currentX = m_animations[i].targetX;
+                } else {
+                    float progress = elapsed / m_animations[i].durationSeconds;
+                    float eased = 1.0f - (1.0f - progress) * (1.0f - progress) * (1.0f - progress);
+                    m_animations[i].currentX = m_animations[i].startX + (m_animations[i].targetX - m_animations[i].startX) * eased;
+                }
+
+                int newX = (int)m_animations[i].currentX;
+
+                // Safely apply hardware-accelerated processing inside the native thread framework
+                if (m_use_hardware && m_fb_mem != MAP_FAILED && oldX != newX) {
+                    TDE_SURFACE_S surf = { m_fb_phys_addr, 0, 1920, 1080, 1920 * 4 };
+                    TDE_RECT_S zeroClip = { 0, 0, 0, 0 };
+                    TDE_OPT_S opts = { 255, 0, zeroClip };
+
+                    TDE_RECT_S srcRect = { oldX, currentY, static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
+                    TDE_RECT_S dstRect = { newX, currentY, static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
+
+                    HI_HANDLE job = TDE_BeginJob();
+                    if (job) {
+                        TDE_Bitblit(job, &surf, &srcRect, &surf, &dstRect, &opts);
+                        TDE_EndJob(job, true, 10); // Wait 10ms until hardware pipeline completes
+                    }
+                }
+
+                return newX;
+            }
+        }
+        return -1;
+    }
+};
 
 extern "C" {
     LauncherAnimator* NewAnimator() { return new LauncherAnimator(); }
     void DeleteAnimator(LauncherAnimator* anim) { if (anim) delete anim; }
     
-    void DispatchPureHardwareSlide(LauncherAnimator* anim, int fx, int tx, int cy, int w, int h, int dur) {
-        if (anim) anim->startAsyncHardwareSlide(fx, tx, cy, w, h, dur);
+    void TriggerSlide(LauncherAnimator* anim, int tileId, int fx, int tx, int dur) {
+        if (anim) anim->startSlide(tileId, fx, tx, dur);
     }
-
-    bool IsAnimationActive(LauncherAnimator* anim) {
-        if (anim) return anim->m_thread_running;
-        return false;
+    
+    int GetCurrentFrameXAdvanced(LauncherAnimator* anim, int tileId, int currentY, int width, int height) {
+        if (anim) return anim->updateCalculationsAdvanced(tileId, currentY, width, height);
+        return -1;
     }
 }
