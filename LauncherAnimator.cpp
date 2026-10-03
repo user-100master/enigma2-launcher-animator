@@ -4,35 +4,11 @@
 #include <sys/mman.h>
 #include <sys/time.h>   
 #include <linux/fb.h>
-#include <dlfcn.h>      
 #include <time.h>
 #include <cmath>
 #include <vector>
-#include <iostream>
+#include <cstring>
 #include <cstdint>      
-
-typedef int32_t HI_HANDLE;
-
-struct TDE_SURFACE_S {
-    uint32_t Phaddr;
-    uint32_t Format;
-    uint32_t Width;
-    uint32_t Height;
-    uint32_t Stride;
-};
-
-struct TDE_RECT_S {
-    int32_t s32Xpos;
-    int32_t s32Ypos;
-    uint32_t u32Width;
-    uint32_t u32Height;
-};
-
-struct TDE_OPT_S {
-    uint32_t global_alpha;
-    uint32_t clip_enable;
-    TDE_RECT_S clip_rect;
-};
 
 struct TileAnimationData {
     int id;
@@ -44,58 +20,32 @@ struct TileAnimationData {
     bool isFinished;
 };
 
-typedef int (*HI_TDE_Open_t)();
-typedef void (*HI_TDE_Close_t)();
-typedef HI_HANDLE (*HI_TDE_BeginJob_t)();
-typedef int (*HI_TDE_Bitblit_t)(HI_HANDLE, const TDE_SURFACE_S*, const TDE_RECT_S*, const TDE_SURFACE_S*, const TDE_RECT_S*, const TDE_OPT_S*);
-typedef int (*HI_TDE_EndJob_t)(HI_HANDLE, bool, uint32_t);
-
 class LauncherAnimator {
 private:
     std::vector<TileAnimationData> m_animations;
-    void* m_tde_handle;
     int m_fb_fd;
     uint32_t* m_fb_mem;
     size_t m_fb_size;
-    uint32_t m_fb_phys_addr;
-    bool m_use_hardware;
-
-    HI_TDE_Open_t TDE_Open;
-    HI_TDE_Close_t TDE_Close;
-    HI_TDE_BeginJob_t TDE_BeginJob;
-    HI_TDE_Bitblit_t TDE_Bitblit;
-    HI_TDE_EndJob_t TDE_EndJob;
+    int m_screen_width;
+    int m_screen_height;
 
 public:
-    LauncherAnimator() : m_tde_handle(nullptr), m_fb_fd(-1), m_fb_mem((uint32_t*)MAP_FAILED), m_use_hardware(false) {
+    LauncherAnimator() : m_fb_fd(-1), m_fb_mem((uint32_t*)MAP_FAILED), m_screen_width(1920), m_screen_height(1080) {
         m_fb_fd = open("/dev/fb0", O_RDWR);
         if (m_fb_fd >= 0) {
             struct fb_var_screeninfo vinfo;
             struct fb_fix_screeninfo finfo;
             if (ioctl(m_fb_fd, FBIOGET_VSCREENINFO, &vinfo) == 0 && ioctl(m_fb_fd, FBIOGET_FSCREENINFO, &finfo) == 0) {
                 m_fb_size = finfo.smem_len;
-                m_fb_phys_addr = finfo.smem_start; 
+                m_screen_width = vinfo.xres;
+                m_screen_height = vinfo.yres;
+                // Direct access memory link to the active display raster layout plane
                 m_fb_mem = (uint32_t*)mmap(0, m_fb_size, PROT_READ | PROT_WRITE, MAP_SHARED, m_fb_fd, 0);
-            }
-        }
-
-        m_tde_handle = dlopen("libhi_msp.so", RTLD_LAZY | RTLD_GLOBAL);
-        if (m_tde_handle) {
-            TDE_Open = (HI_TDE_Open_t)dlsym(m_tde_handle, "HI_TDE2_Open");
-            TDE_Close = (HI_TDE_Close_t)dlsym(m_tde_handle, "HI_TDE2_Close");
-            TDE_BeginJob = (HI_TDE_BeginJob_t)dlsym(m_tde_handle, "HI_TDE2_BeginJob");
-            TDE_Bitblit = (HI_TDE_Bitblit_t)dlsym(m_tde_handle, "HI_TDE2_Bitblit");
-            TDE_EndJob = (HI_TDE_EndJob_t)dlsym(m_tde_handle, "HI_TDE2_EndJob");
-
-            if (TDE_Open && TDE_BeginJob && TDE_Bitblit && TDE_EndJob && TDE_Open() == 0) {
-                m_use_hardware = true;
             }
         }
     }
 
     ~LauncherAnimator() {
-        if (m_use_hardware && TDE_Close) TDE_Close();
-        if (m_tde_handle) dlclose(m_tde_handle);
         if (m_fb_mem != MAP_FAILED) munmap(m_fb_mem, m_fb_size);
         if (m_fb_fd >= 0) close(m_fb_fd);
     }
@@ -118,7 +68,8 @@ public:
         m_animations.push_back(anim);
     }
 
-    int updateCalculationsAdvanced(int tileId, int currentY, int width, int height) {
+    // Direct Canvas shift bypasses unstable driver libraries entirely
+    int updateCalculationsDirect(int tileId, int currentY, int width, int height) {
         struct timespec currentTime;
         clock_gettime(CLOCK_MONOTONIC, &currentTime);
 
@@ -146,19 +97,21 @@ public:
 
                 int newX = (int)m_animations[i].currentX;
 
-                // Safely apply hardware-accelerated processing inside the native thread framework
-                if (m_use_hardware && m_fb_mem != MAP_FAILED && oldX != newX) {
-                    TDE_SURFACE_S surf = { m_fb_phys_addr, 0, 1920, 1080, 1920 * 4 };
-                    TDE_RECT_S zeroClip = { 0, 0, 0, 0 };
-                    TDE_OPT_S opts = { 255, 0, zeroClip };
-
-                    TDE_RECT_S srcRect = { oldX, currentY, static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
-                    TDE_RECT_S dstRect = { newX, currentY, static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
-
-                    HI_HANDLE job = TDE_BeginJob();
-                    if (job) {
-                        TDE_Bitblit(job, &surf, &srcRect, &surf, &dstRect, &opts);
-                        TDE_EndJob(job, true, 10); // Wait 10ms until hardware pipeline completes
+                // Move pixel block pointers safely across memory pages
+                if (m_fb_mem != MAP_FAILED && oldX != newX && width > 0 && height > 0) {
+                    // Prevent memory overflow boundaries
+                    int safeWidth = (newX + width > m_screen_width) ? (m_screen_width - newX) : width;
+                    if (oldX + safeWidth > m_screen_width) safeWidth = m_screen_width - oldX;
+                    
+                    if (safeWidth > 0 && currentY + height <= m_screen_height) {
+                        // High-speed row-by-row memory relocation loop
+                        for (int row = 0; row < height; ++row) {
+                            int actualRow = currentY + row;
+                            uint32_t* rowBase = m_fb_mem + (actualRow * m_screen_width);
+                            
+                            // Safe layout shifts
+                            std::memmove(rowBase + newX, rowBase + oldX, safeWidth * sizeof(uint32_t));
+                        }
                     }
                 }
 
@@ -178,7 +131,7 @@ extern "C" {
     }
     
     int GetCurrentFrameXAdvanced(LauncherAnimator* anim, int tileId, int currentY, int width, int height) {
-        if (anim) return anim->updateCalculationsAdvanced(tileId, currentY, width, height);
+        if (anim) return anim->updateCalculationsDirect(tileId, currentY, width, height);
         return -1;
     }
 }
