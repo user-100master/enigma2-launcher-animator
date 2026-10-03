@@ -10,7 +10,7 @@
 #include <cmath>
 #include <vector>
 #include <iostream>
-#include <cstdint>      // FIXED: Resolves all 'uint32_t does not name a type' errors
+#include <cstdint>      
 
 typedef int32_t HI_HANDLE;
 
@@ -59,15 +59,16 @@ private:
     size_t m_fb_size;
     uint32_t m_fb_phys_addr;
     bool m_use_hardware;
-
+    
 public:
+    volatile bool m_thread_running; // Thread safety flag
     HI_TDE_Open_t TDE_Open;
     HI_TDE_Close_t TDE_Close;
     HI_TDE_BeginJob_t TDE_BeginJob;
     HI_TDE_Bitblit_t TDE_Bitblit;
     HI_TDE_EndJob_t TDE_EndJob;
 
-    LauncherAnimator() : m_tde_handle(nullptr), m_fb_fd(-1), m_fb_mem((uint32_t*)MAP_FAILED), m_use_hardware(false) {
+    LauncherAnimator() : m_tde_handle(nullptr), m_fb_fd(-1), m_fb_mem((uint32_t*)MAP_FAILED), m_use_hardware(false), m_thread_running(false) {
         m_fb_fd = open("/dev/fb0", O_RDWR);
         if (m_fb_fd >= 0) {
             struct fb_var_screeninfo vinfo;
@@ -106,7 +107,6 @@ public:
     void startAsyncHardwareSlide(int fromX, int toX, int currentY, int width, int height, int durationMs);
 };
 
-// Isolated global C-style routing wrapper ensuring flawless static compilation
 void* runAnimationThreadInternal(void* arg) {
     ThreadedAnimParams* p = reinterpret_cast<ThreadedAnimParams*>(arg);
     LauncherAnimator* self = reinterpret_cast<LauncherAnimator*>(p->animator_instance);
@@ -119,8 +119,6 @@ void* runAnimationThreadInternal(void* arg) {
     bool finished = false;
 
     TDE_SURFACE_S surf = { self->getPhysAddr(), 0, 1920, 1080, 1920 * 4 };
-    
-    // FIXED: Properly nested initializer arrays targeting layout clipping rules
     TDE_RECT_S zeroClip = { 0, 0, 0, 0 };
     TDE_OPT_S opts = { 255, 0, zeroClip };
 
@@ -140,7 +138,6 @@ void* runAnimationThreadInternal(void* arg) {
 
         if (oldX != newX) {
             if (self->isHardwareActive()) {
-                // FIXED: Explicitly cast parameters to matching structure metrics
                 TDE_RECT_S srcRect = { oldX, p->currentY, static_cast<uint32_t>(p->width), static_cast<uint32_t>(p->height) };
                 TDE_RECT_S dstRect = { newX, p->currentY, static_cast<uint32_t>(p->width), static_cast<uint32_t>(p->height) };
 
@@ -161,11 +158,13 @@ void* runAnimationThreadInternal(void* arg) {
         }
     }
 
+    self->m_thread_running = false; // Toggle complete status cleanly
     delete p;
     return nullptr;
 }
 
 void LauncherAnimator::startAsyncHardwareSlide(int fromX, int toX, int currentY, int width, int height, int durationMs) {
+    m_thread_running = true;
     ThreadedAnimParams* params = new ThreadedAnimParams();
     params->animator_instance = this;
     params->fromX = fromX;
@@ -186,5 +185,10 @@ extern "C" {
     
     void DispatchPureHardwareSlide(LauncherAnimator* anim, int fx, int tx, int cy, int w, int h, int dur) {
         if (anim) anim->startAsyncHardwareSlide(fx, tx, cy, w, h, dur);
+    }
+
+    bool IsAnimationActive(LauncherAnimator* anim) {
+        if (anim) return anim->m_thread_running;
+        return false;
     }
 }
