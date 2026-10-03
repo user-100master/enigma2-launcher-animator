@@ -2,7 +2,6 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/time.h>   
 #include <linux/fb.h>
 #include <time.h>
 #include <cmath>
@@ -15,7 +14,7 @@ struct TileAnimationData {
     float startX;
     float targetX;
     float currentX;
-    struct timespec startTime;
+    float currentTime; // Frame-driven time track instead of system clock
     float durationSeconds;
     bool isFinished;
 };
@@ -39,7 +38,6 @@ public:
                 m_fb_size = finfo.smem_len;
                 m_screen_width = vinfo.xres;
                 m_screen_height = vinfo.yres;
-                // Direct access memory link to the active display raster layout plane
                 m_fb_mem = (uint32_t*)mmap(0, m_fb_size, PROT_READ | PROT_WRITE, MAP_SHARED, m_fb_fd, 0);
             }
         }
@@ -62,17 +60,15 @@ public:
         anim.startX = (float)fromX;
         anim.targetX = (float)toX;
         anim.currentX = anim.startX;
+        anim.currentTime = 0.0f; // Reset chronological frame index
         anim.durationSeconds = (float)durationMs / 1000.0f;
         anim.isFinished = false;
-        clock_gettime(CLOCK_MONOTONIC, &anim.startTime);
+
         m_animations.push_back(anim);
     }
 
-    // Direct Canvas shift bypasses unstable driver libraries entirely
-    int updateCalculationsDirect(int tileId, int currentY, int width, int height) {
-        struct timespec currentTime;
-        clock_gettime(CLOCK_MONOTONIC, &currentTime);
-
+    // Accept structural deltaTime increments directly out of the Python timer loop
+    int updateCalculationsDirect(int tileId, int currentY, int width, int height, float deltaTime) {
         for (size_t i = 0; i < m_animations.size(); ++i) {
             if (m_animations[i].id == tileId) {
                 if (m_animations[i].isFinished) {
@@ -81,35 +77,32 @@ public:
                     return finalX;
                 }
 
-                float elapsed = (currentTime.tv_sec - m_animations[i].startTime.tv_sec) + 
-                                (currentTime.tv_nsec - m_animations[i].startTime.tv_nsec) / 1000000000.0f;
-
                 int oldX = (int)m_animations[i].currentX;
+                
+                // Explicit frame progression step allocation
+                m_animations[i].currentTime += deltaTime;
 
-                if (elapsed >= m_animations[i].durationSeconds) {
+                if (m_animations[i].currentTime >= m_animations[i].durationSeconds) {
                     m_animations[i].isFinished = true;
                     m_animations[i].currentX = m_animations[i].targetX;
                 } else {
-                    float progress = elapsed / m_animations[i].durationSeconds;
-                    float eased = 1.0f - (1.0f - progress) * (1.0f - progress) * (1.0f - progress);
+                    float progress = m_animations[i].currentTime / m_animations[i].durationSeconds;
+                    // PREMIUM CUBIC EASE-OUT MATH: f(t) = 1 - (1 - t)^3
+                    float eased = 1.0f - std::pow(1.0f - progress, 3.0f);
                     m_animations[i].currentX = m_animations[i].startX + (m_animations[i].targetX - m_animations[i].startX) * eased;
                 }
 
                 int newX = (int)m_animations[i].currentX;
 
-                // Move pixel block pointers safely across memory pages
+                // Sync pixel row buffer memory structures instantly
                 if (m_fb_mem != MAP_FAILED && oldX != newX && width > 0 && height > 0) {
-                    // Prevent memory overflow boundaries
                     int safeWidth = (newX + width > m_screen_width) ? (m_screen_width - newX) : width;
                     if (oldX + safeWidth > m_screen_width) safeWidth = m_screen_width - oldX;
                     
                     if (safeWidth > 0 && currentY + height <= m_screen_height) {
-                        // High-speed row-by-row memory relocation loop
                         for (int row = 0; row < height; ++row) {
                             int actualRow = currentY + row;
                             uint32_t* rowBase = m_fb_mem + (actualRow * m_screen_width);
-                            
-                            // Safe layout shifts
                             std::memmove(rowBase + newX, rowBase + oldX, safeWidth * sizeof(uint32_t));
                         }
                     }
@@ -130,8 +123,8 @@ extern "C" {
         if (anim) anim->startSlide(tileId, fx, tx, dur);
     }
     
-    int GetCurrentFrameXAdvanced(LauncherAnimator* anim, int tileId, int currentY, int width, int height) {
-        if (anim) return anim->updateCalculationsDirect(tileId, currentY, width, height);
+    int GetCurrentFrameXAdvanced(LauncherAnimator* anim, int tileId, int currentY, int width, int height, float deltaTime) {
+        if (anim) return anim->updateCalculationsDirect(tileId, currentY, width, height, deltaTime);
         return -1;
     }
 }
