@@ -1,12 +1,6 @@
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
-#include <sys/mman.h>
-#include <linux/fb.h>
 #include <time.h>
 #include <cmath>
 #include <vector>
-#include <cstring>
 #include <cstdint>      
 
 struct TileAnimationData {
@@ -22,38 +16,10 @@ struct TileAnimationData {
 class LauncherAnimator {
 private:
     std::vector<TileAnimationData> m_animations;
-    int m_fb_fd;
-    uint32_t* m_fb_mem;
-    uint32_t* m_backup_buffer; 
-    size_t m_fb_size;
-    int m_screen_width;
-    int m_screen_height;
 
 public:
-    LauncherAnimator() : m_fb_fd(-1), m_fb_mem((uint32_t*)MAP_FAILED), m_backup_buffer(nullptr), m_screen_width(1920), m_screen_height(1080) {
-        m_fb_fd = open("/dev/fb0", O_RDWR);
-        if (m_fb_fd >= 0) {
-            struct fb_var_screeninfo vinfo;
-            struct fb_fix_screeninfo finfo;
-            if (ioctl(m_fb_fd, FBIOGET_VSCREENINFO, &vinfo) == 0 && ioctl(m_fb_fd, FBIOGET_FSCREENINFO, &finfo) == 0) {
-                m_fb_size = finfo.smem_len;
-                m_screen_width = vinfo.xres;
-                m_screen_height = vinfo.yres;
-                m_fb_mem = (uint32_t*)mmap(0, m_fb_size, PROT_READ | PROT_WRITE, MAP_SHARED, m_fb_fd, 0);
-                
-                if (m_fb_mem != MAP_FAILED) {
-                    m_backup_buffer = new uint32_t[m_fb_size / sizeof(uint32_t)];
-                    std::memcpy(m_backup_buffer, m_fb_mem, m_fb_size);
-                }
-            }
-        }
-    }
-
-    ~LauncherAnimator() {
-        if (m_backup_buffer) delete[] m_backup_buffer;
-        if (m_fb_mem != MAP_FAILED) munmap(m_fb_mem, m_fb_size);
-        if (m_fb_fd >= 0) close(m_fb_fd);
-    }
+    LauncherAnimator() {}
+    ~LauncherAnimator() {}
 
     void startSlide(int tileId, int fromX, int toX, int durationMs) {
         for (size_t i = 0; i < m_animations.size(); ++i) {
@@ -63,11 +29,6 @@ public:
             }
         }
         
-        // Refresh the dynamic wallpaper baseline backup safely
-        if (m_fb_mem != MAP_FAILED && m_backup_buffer) {
-            std::memcpy(m_backup_buffer, m_fb_mem, m_fb_size);
-        }
-
         TileAnimationData anim;
         anim.id = tileId;
         anim.startX = (float)fromX;
@@ -80,14 +41,12 @@ public:
         m_animations.push_back(anim);
     }
 
-    int updateCalculationsDirect(int tileId, int currentY, int width, int height, float deltaTime) {
+    int updateCalculationsDirect(int tileId, float deltaTime) {
         for (size_t i = 0; i < m_animations.size(); ++i) {
             if (m_animations[i].id == tileId) {
-                int oldX = (int)m_animations[i].currentX;
-                
                 if (m_animations[i].isFinished) {
                     m_animations.erase(m_animations.begin() + i);
-                    return -2; // Signal clear complete status boundary
+                    return -2; // Loop complete status boundary code
                 }
 
                 m_animations[i].currentTime += deltaTime;
@@ -97,33 +56,11 @@ public:
                     m_animations[i].currentX = m_animations[i].targetX;
                 } else {
                     float progress = m_animations[i].currentTime / m_animations[i].durationSeconds;
-                    // Strict math structure prevents out-of-bound micro adjustments
                     float eased = 1.0f - std::pow(1.0f - progress, 3.0f);
                     m_animations[i].currentX = m_animations[i].startX + (m_animations[i].targetX - m_animations[i].startX) * eased;
                 }
 
-                int newX = (int)m_animations[i].currentX;
-
-                if (m_fb_mem != MAP_FAILED && m_backup_buffer && oldX != newX && width > 0 && height > 0) {
-                    for (int row = 0; row < height; ++row) {
-                        int actualRow = currentY + row;
-                        if (actualRow >= m_screen_height) break;
-
-                        uint32_t* rowBaseLive = m_fb_mem + (actualRow * m_screen_width);
-                        uint32_t* rowBaseBackup = m_backup_buffer + (actualRow * m_screen_width);
-                        
-                        // Strict boundary clipping limits to avoid color matrix corruption
-                        if (oldX + width <= m_screen_width && newX + width <= m_screen_width && oldX >= 0 && newX >= 0) {
-                            // 1. Restore baseline backup over old coordinates to clean the trailing edge
-                            std::memcpy(rowBaseLive + oldX, rowBaseBackup + oldX, width * sizeof(uint32_t));
-                            
-                            // 2. Write the graphic layout block cleanly to its new position
-                            std::memmove(rowBaseLive + newX, rowBaseBackup + (int)m_animations[i].startX, width * sizeof(uint32_t));
-                        }
-                    }
-                }
-
-                return newX;
+                return static_cast<int>(std::round(m_animations[i].currentX));
             }
         }
         return -1;
@@ -138,8 +75,8 @@ extern "C" {
         if (anim) anim->startSlide(tileId, fx, tx, dur);
     }
     
-    int GetCurrentFrameXAdvanced(LauncherAnimator* anim, int tileId, int currentY, int width, int height, float deltaTime) {
-        if (anim) return anim->updateCalculationsDirect(tileId, currentY, width, height, deltaTime);
+    int GetCurrentFrameXAdvanced(LauncherAnimator* anim, int tileId, float deltaTime) {
+        if (anim) return anim->updateCalculationsDirect(tileId, deltaTime);
         return -1;
     }
 }
