@@ -24,7 +24,7 @@ private:
     std::vector<TileAnimationData> m_animations;
     int m_fb_fd;
     uint32_t* m_fb_mem;
-    uint32_t* m_backup_buffer; // Background cache array configuration
+    uint32_t* m_backup_buffer; 
     size_t m_fb_size;
     int m_screen_width;
     int m_screen_height;
@@ -42,7 +42,6 @@ public:
                 m_fb_mem = (uint32_t*)mmap(0, m_fb_size, PROT_READ | PROT_WRITE, MAP_SHARED, m_fb_fd, 0);
                 
                 if (m_fb_mem != MAP_FAILED) {
-                    // Cache the baseline wallpaper state out of memory pages on startup
                     m_backup_buffer = new uint32_t[m_fb_size / sizeof(uint32_t)];
                     std::memcpy(m_backup_buffer, m_fb_mem, m_fb_size);
                 }
@@ -64,7 +63,7 @@ public:
             }
         }
         
-        // Refresh dynamic canvas cache layer baseline from live state
+        // Refresh the dynamic wallpaper baseline backup safely
         if (m_fb_mem != MAP_FAILED && m_backup_buffer) {
             std::memcpy(m_backup_buffer, m_fb_mem, m_fb_size);
         }
@@ -98,6 +97,7 @@ public:
                     m_animations[i].currentX = m_animations[i].targetX;
                 } else {
                     float progress = m_animations[i].currentTime / m_animations[i].durationSeconds;
+                    // Strict math structure prevents out-of-bound micro adjustments
                     float eased = 1.0f - std::pow(1.0f - progress, 3.0f);
                     m_animations[i].currentX = m_animations[i].startX + (m_animations[i].targetX - m_animations[i].startX) * eased;
                 }
@@ -112,11 +112,14 @@ public:
                         uint32_t* rowBaseLive = m_fb_mem + (actualRow * m_screen_width);
                         uint32_t* rowBaseBackup = m_backup_buffer + (actualRow * m_screen_width);
                         
-                        // 1. Wipe away the ghosting trail using clean background pixels
-                        std::memcpy(rowBaseLive + oldX, rowBaseBackup + oldX, width * sizeof(uint32_t));
-                        
-                        // 2. Draw the pixel row at its brand new position
-                        std::memmove(rowBaseLive + newX, rowBaseBackup + oldX, width * sizeof(uint32_t));
+                        // Strict boundary clipping limits to avoid color matrix corruption
+                        if (oldX + width <= m_screen_width && newX + width <= m_screen_width && oldX >= 0 && newX >= 0) {
+                            // 1. Restore baseline backup over old coordinates to clean the trailing edge
+                            std::memcpy(rowBaseLive + oldX, rowBaseBackup + oldX, width * sizeof(uint32_t));
+                            
+                            // 2. Write the graphic layout block cleanly to its new position
+                            std::memmove(rowBaseLive + newX, rowBaseBackup + (int)m_animations[i].startX, width * sizeof(uint32_t));
+                        }
                     }
                 }
 
